@@ -11,7 +11,7 @@ import isEmpty from 'licia/isEmpty'
 import isNull from 'licia/isNull'
 import Style from './Application.module.scss'
 import { observer } from 'mobx-react-lite'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import store from '../../store'
 import { PannelLoading } from '../common/loading'
 import ToolbarIcon from 'share/renderer/components/ToolbarIcon'
@@ -38,6 +38,13 @@ import { useWindowResize } from 'share/renderer/lib/hooks'
 import fileSize from 'licia/fileSize'
 import jsonClone from 'licia/jsonClone'
 
+interface IconObject {
+  info: IPackageInfo
+  src: string
+  name: string
+  style: React.CSSProperties
+}
+
 export default observer(function Application() {
   const [isLoading, setIsLoading] = useState(false)
   const [packageInfo, setPackageInfo] = useState<IPackageInfo | null>(null)
@@ -54,14 +61,36 @@ export default observer(function Application() {
     height: 0,
   })
   const draggingRef = useRef(0)
-  const iconsRef = useRef<any[]>([])
+  const iconsRef = useRef<IconObject[]>([])
 
   const { device } = store
 
   useEffect(() => {
     refresh()
+    return () => {
+      draggingRef.current = 0
+    }
   }, [])
   useWindowResize(() => dataGridRef.current?.fit())
+
+  function getIconStyle(info: IPackageInfo) {
+    const style: React.CSSProperties = {
+      borderRadius: '20%',
+    }
+    if (!info.enabled) {
+      style.filter = 'grayscale(100%)'
+    }
+    return style
+  }
+
+  function createIconObject(info: IPackageInfo) {
+    return {
+      info,
+      src: info.icon || defaultIcon,
+      name: info.label,
+      style: getIconStyle(info),
+    }
+  }
 
   async function refresh(packageName?: string) {
     if (!device || isLoading) {
@@ -75,28 +104,14 @@ export default observer(function Application() {
         store.application.sysPackage
       )
       const chunks = chunk(packages, 50)
-      let packageInfos: any[] = []
+      let packageInfos: IPackageInfo[] = []
       for (let i = 0, len = chunks.length; i < len; i++) {
         const chunk = chunks[i]
         packageInfos = concat(
           packageInfos,
           await main.getPackageInfos(device.id, chunk)
         )
-        iconsRef.current = map(packageInfos, (info) => {
-          const style: any = {
-            borderRadius: '20%',
-          }
-          if (!info.enabled) {
-            style.filter = 'grayscale(100%)'
-          }
-
-          return {
-            info: info,
-            src: info.icon || defaultIcon,
-            name: info.label,
-            style,
-          }
-        })
+        iconsRef.current = map(packageInfos, createIconObject)
         setPackageInfos(packageInfos)
       }
       setIsLoading(false)
@@ -109,25 +124,14 @@ export default observer(function Application() {
         const infos = await main.getPackageInfos(device.id, [packageName])
         const info = infos[0]
         packageInfos[idx] = info
-        const style: any = {
-          borderRadius: '20%',
-        }
-        if (!info.enabled) {
-          style.filter = 'grayscale(100%)'
-        }
-        iconsRef.current[idx] = {
-          info: info,
-          src: info.icon || defaultIcon,
-          name: info.label,
-          style,
-        }
+        iconsRef.current[idx] = createIconObject(info)
         iconsRef.current = clone(iconsRef.current)
         setPackageInfos(clone(packageInfos))
       }
     }
   }
 
-  async function onDrop(e: React.DragEvent) {
+  const onDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setDropHighlight(false)
     const files = e.dataTransfer.files
@@ -140,16 +144,16 @@ export default observer(function Application() {
       apkPaths.push(path)
     }
     await install(apkPaths)
-  }
+  }, [])
 
-  async function install(apkPaths?: string[]) {
+  const install = useCallback(async (apkPaths?: string[]) => {
     const result = await installPackages(device!.id, apkPaths)
     if (result) {
       refresh()
     }
-  }
+  }, [device])
 
-  function showInfo(packageName: string) {
+  const showInfo = useCallback((packageName: string) => {
     const packageInfo = find(
       packageInfos,
       (info) => info.packageName === packageName
@@ -158,9 +162,9 @@ export default observer(function Application() {
       setPackageInfo(packageInfo)
       setPackageInfoModalVisible(true)
     }
-  }
+  }, [packageInfos])
 
-  function confirmText(key: string, info: any) {
+  const confirmText = useCallback((key: string, info: IPackageInfo) => {
     const ret = t(key, { name: info.label })
 
     if (info.system) {
@@ -168,20 +172,24 @@ export default observer(function Application() {
     }
 
     return ret
-  }
+  }, [])
 
-  async function open(packageName: string) {
+  const open = useCallback(async (packageName: string) => {
     try {
       await main.startPackage(store.device!.id, packageName)
     } catch {
       notify(t('startPackageErr'), { icon: 'error' })
     }
-  }
+  }, [store.device])
 
-  function onContextMenu(e: PointerEvent, info: IPackageInfo) {
+  const onContextMenu = useCallback((e: PointerEvent, info: IPackageInfo) => {
     const device = store.device!
 
-    const template: any[] = [
+    const template: Array<{
+      label?: string
+      click?: () => void | Promise<void>
+      type?: 'separator'
+    }> = [
       {
         label: t('packageInfo'),
         click() {
@@ -287,7 +295,26 @@ export default observer(function Application() {
     ]
 
     contextMenu(e, template)
-  }
+  }, [showInfo, open, refresh, confirmText])
+
+  const onDragEnter = useCallback(() => {
+    draggingRef.current++
+  }, [])
+
+  const onDragLeave = useCallback(() => {
+    draggingRef.current--
+    if (draggingRef.current === 0) {
+      setDropHighlight(false)
+    }
+  }, [])
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (!isFileDrop(e)) {
+      return
+    }
+    e.preventDefault()
+    setDropHighlight(true)
+  }, [])
 
   const applications = (
     <div
@@ -296,22 +323,9 @@ export default observer(function Application() {
         overflowY: store.application.listView ? 'hidden' : 'auto',
       }}
       onDrop={onDrop}
-      onDragEnter={() => {
-        draggingRef.current++
-      }}
-      onDragLeave={() => {
-        draggingRef.current--
-        if (draggingRef.current === 0) {
-          setDropHighlight(false)
-        }
-      }}
-      onDragOver={(e) => {
-        if (!isFileDrop(e)) {
-          return
-        }
-        e.preventDefault()
-        setDropHighlight(true)
-      }}
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+      onDragOver={onDragOver}
     >
       {store.application.listView ? (
         <LunaDataGrid
@@ -319,14 +333,14 @@ export default observer(function Application() {
             const columns = dataGridRef.current!.getOption('columns')
             store.application.set('dataGridColumns', jsonClone(columns))
           }}
-          onClick={(e: any, node) => {
-            showInfo((node.data as any).packageName)
+          onClick={(_e: any, node: any) => {
+            showInfo(node.data.packageName)
           }}
-          onDoubleClick={(e: any, node) => {
-            open((node.data as any).packageName)
+          onDoubleClick={(_e: any, node: any) => {
+            open(node.data.packageName)
           }}
-          onContextMenu={(e: any, node) => {
-            onContextMenu(e, (node.data as any).info)
+          onContextMenu={(_e: any, node: any) => {
+            onContextMenu(_e, node.data.info)
           }}
           headerContextMenu={true}
           filter={filter}
